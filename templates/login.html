@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0f1117">
+<title>Mis Gastos · Entrar</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon/192.png">
+<link rel="apple-touch-icon" href="/icon/apple.png">
+<script>(function(){var d='dark';try{var t=localStorage.getItem('theme')||'auto';d=t==='auto'?(matchMedia('(prefers-color-scheme: light)').matches?'light':'dark'):t;}catch(e){}document.documentElement.dataset.theme=d;})();</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#0f1117;--surface:#171a23;--surface2:#1f2330;--line:#2a2f3e;--text:#eef0f6;--muted:#8a8fa3;--accent:#7c5cff;--accent2:#a48bff;--expense:#ff5c7a}
+:root[data-theme=light]{--bg:#f3f4f9;--surface:#ffffff;--surface2:#eef0f6;--line:#e1e4ee;--text:#141722;--muted:#696e84;--accent:#6c4cf5;--accent2:#8a6cff;--expense:#e23a5b}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+body{font-family:'Plus Jakarta Sans',system-ui,sans-serif;background:var(--bg);color:var(--text);min-height:100vh;
+  display:flex;align-items:center;justify-content:center;padding:24px 16px}
+.box{width:100%;max-width:380px}
+.logo{width:72px;height:72px;border-radius:22px;display:block;margin:0 auto 18px;box-shadow:0 16px 40px -12px rgba(124,92,255,.7)}
+h1{text-align:center;font-size:24px;font-weight:800;letter-spacing:-.5px}
+p.sub{text-align:center;color:var(--muted);font-size:14px;margin:6px 0 26px}
+.tabs{display:flex;background:var(--surface);border-radius:14px;padding:4px;margin-bottom:18px}
+.tabs button{flex:1;padding:11px;border-radius:11px;font-weight:700;font-size:14px;color:var(--muted);background:none;border:none;font-family:inherit;cursor:pointer}
+.tabs button.on{background:var(--accent);color:#fff}
+label{display:block;font-size:12px;color:var(--muted);font-weight:600;margin:14px 0 7px}
+input{width:100%;background:var(--surface);border:1px solid var(--line);color:var(--text);border-radius:14px;padding:14px;font-size:16px;font-family:inherit;outline:none}
+input:focus{border-color:var(--accent)}
+.btn{width:100%;padding:15px;border-radius:16px;font-weight:700;font-size:15px;margin-top:22px;background:linear-gradient(135deg,var(--accent2),var(--accent));color:#fff;border:none;font-family:inherit;cursor:pointer}
+.btn:disabled{opacity:.6}
+.err{color:var(--expense);font-size:13px;font-weight:600;margin-top:14px;text-align:center;min-height:18px}
+.hint{color:var(--muted);font-size:12px;margin-top:6px}
+</style>
+</head>
+<body>
+<div class="box">
+  <img class="logo" src="/icon/192.png" alt="">
+  <h1>Mis Gastos</h1>
+  <p class="sub">Tus finanzas, claras y bajo control</p>
+
+  <div class="tabs">
+    <button class="on" data-m="login">Entrar</button>
+    <button data-m="register">Crear cuenta</button>
+  </div>
+
+  <form id="f" autocomplete="on">
+    <label for="u">Usuario</label>
+    <input id="u" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+    <label for="p">Contraseña</label>
+    <input id="p" name="password" type="password" autocomplete="current-password" required>
+    <div id="regExtra" style="display:none">
+      <div class="hint">Mínimo 6 caracteres.</div>
+      <div id="inviteWrap" style="display:none">
+        <label for="i">Código de invitación</label>
+        <input id="i" autocapitalize="none" spellcheck="false">
+      </div>
+    </div>
+    <button class="btn" id="go" type="submit">Entrar</button>
+    <div class="err" id="err"></div>
+  </form>
+</div>
+
+<script>
+let mode = 'login', inviteRequired = false;
+const $ = s => document.querySelector(s);
+fetch('/api/config').then(r=>r.json()).then(c=>{ inviteRequired = c.invite_required; setMode(mode); });
+
+function setMode(m){
+  mode = m;
+  document.querySelectorAll('.tabs button').forEach(b=>b.classList.toggle('on', b.dataset.m===m));
+  $('#regExtra').style.display = m==='register' ? 'block' : 'none';
+  $('#inviteWrap').style.display = m==='register' && inviteRequired ? 'block' : 'none';
+  $('#p').autocomplete = m==='register' ? 'new-password' : 'current-password';
+  $('#go').textContent = m==='register' ? 'Crear cuenta' : 'Entrar';
+  $('#err').textContent = '';
+}
+document.querySelectorAll('.tabs button').forEach(b=>b.onclick=()=>setMode(b.dataset.m));
+
+$('#f').onsubmit = async e => {
+  e.preventDefault();
+  $('#go').disabled = true; $('#err').textContent = '';
+  try{
+    const r = await fetch(`/api/auth/${mode}`, {
+      method:'POST',
+      headers:{'Content-Type':'application/json','X-Requested-With':'fetch'},
+      body: JSON.stringify({username:$('#u').value, password:$('#p').value, invite:$('#i').value})
+    });
+    const d = await r.json().catch(()=>({}));
+    if (!r.ok) throw new Error(d.error || 'Error');
+    location.href = '/';
+  }catch(err){ $('#err').textContent = err.message; }
+  finally{ $('#go').disabled = false; }
+};
+
+if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
+</script>
+</body>
+</html>
