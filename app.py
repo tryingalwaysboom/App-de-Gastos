@@ -292,7 +292,87 @@ def shift_key(ym, n):
 
 
 def body():
-    return request.get_json(silent=True) or {}
+    d = request.get_json(silent=True)
+    return d if isinstance(d, dict) else {}
+
+
+# ---------- Validación de entradas ----------
+class BadInput(ValueError):
+    pass
+
+
+MAX_AMOUNT = Decimal("9999999999.99")      # cabe en NUMERIC(12,2)
+KEY_RE = re.compile(r"^(\d{4})-(\d{2})$")
+COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def parse_amount(v, allow_negative=False, msg="Importe inválido"):
+    try:
+        a = Decimal(str(v).replace(",", ".")).quantize(Decimal("0.01"))
+    except Exception:
+        raise BadInput(msg)
+    if not a.is_finite() or abs(a) > MAX_AMOUNT or a == 0 or (a < 0 and not allow_negative):
+        raise BadInput(msg)
+    return a
+
+
+def parse_optional_amount(v, msg="Importe inválido"):
+    if v in (None, "", 0, "0"):
+        return None
+    return parse_amount(v, msg=msg)
+
+
+def parse_date(v, default=None, msg="Fecha inválida"):
+    if v in (None, ""):
+        return default
+    try:
+        d = date.fromisoformat(str(v)[:10])
+    except Exception:
+        raise BadInput(msg)
+    if not 1900 <= d.year <= 2999:
+        raise BadInput(msg)
+    return d
+
+
+def parse_key(v, default):
+    """Clave de periodo 'YYYY-MM'."""
+    if not v:
+        return default
+    m = KEY_RE.match(str(v))
+    if not m or not 1900 <= int(m.group(1)) <= 2999 or not 1 <= int(m.group(2)) <= 12:
+        raise BadInput("Mes inválido")
+    return v
+
+
+def parse_color(v, default):
+    if v in (None, ""):
+        return default
+    if not COLOR_RE.match(str(v)):
+        raise BadInput("Color inválido")
+    return str(v).lower()
+
+
+def parse_icon(v, default):
+    if v in (None, ""):
+        return default
+    v = str(v).strip()
+    if not v or len(v) > 8 or any(ch in v for ch in "<>&\"'`=/\\") or any(ch.isalnum() and ch.isascii() for ch in v):
+        raise BadInput("Icono inválido")
+    return v
+
+
+def parse_text(v, maxlen=500):
+    return (str(v) if v is not None else "").strip()[:maxlen]
+
+
+@app.errorhandler(BadInput)
+def bad_input(e):
+    return jsonify({"error": str(e) or "Datos inválidos"}), 400
+
+
+@app.errorhandler(psycopg.errors.DataError)
+def bad_data(e):
+    return jsonify({"error": "Datos inválidos"}), 400
 
 
 def own_category(conn, uid, cid):
@@ -380,12 +460,18 @@ def load_user():
     return None
 
 
+# Con contraseña temporal solo se puede consultar la cuenta, cambiar la clave o salir
+PW_CHANGE_ALLOWED = {"me", "change_password", "logout"}
+
+
 def login_required(f):
     @wraps(f)
     def wrapper(*a, **kw):
         g.user = load_user()
         if not g.user:
             return jsonify({"error": "no autenticado"}), 401
+        if g.user["must_change_pw"] and request.endpoint not in PW_CHANGE_ALLOWED:
+            return jsonify({"error": "Cambia tu contraseña temporal para continuar"}), 403
         return f(*a, **kw)
     return wrapper
 
@@ -396,6 +482,8 @@ def admin_required(f):
         g.user = load_user()
         if not g.user:
             return jsonify({"error": "no autenticado"}), 401
+        if g.user["must_change_pw"]:
+            return jsonify({"error": "Cambia tu contraseña temporal para continuar"}), 403
         if not g.user["is_admin"]:
             return jsonify({"error": "Solo para administradores"}), 403
         return f(*a, **kw)
@@ -417,18 +505,29 @@ def csrf_guard():
             return jsonify({"error": "petición no válida"}), 400
 
 
-_fails = {}
+_fails = {}          # clave -> (intentos, bloqueado_hasta, ultimo_intento)
+FAIL_TTL = 15 * 60   # se olvidan los intentos tras 15 min sin actividad
+
+
+def _prune_fails():
+    if len(_fails) < 500:
+        return
+    now = time.time()
+    for k in [k for k, (_, until, last) in _fails.items() if until < now and now - last > FAIL_TTL]:
+        _fails.pop(k, None)
 
 
 def throttled(key):
-    n, until = _fails.get(key, (0, 0))
+    _, until, _ = _fails.get(key, (0, 0, 0))
     return until > time.time()
 
 
-def register_fail(key):
-    n, _ = _fails.get(key, (0, 0))
-    n += 1
-    _fails[key] = (n, time.time() + 60 if n >= 5 else 0)
+def register_fail(key, limit=5, block=60):
+    _prune_fails()
+    now = time.time()
+    n, _, last = _fails.get(key, (0, 0, 0))
+    n = 1 if now - last > FAIL_TTL else n + 1
+    _fails[key] = (n, now + block if n >= limit else 0, now)
 
 
 USERNAME_RE = re.compile(r"^[a-z0-9._-]{3,32}$")
@@ -445,6 +544,10 @@ def register():
     d = body()
     username = (d.get("username") or "").strip().lower()
     password = d.get("password") or ""
+    rkey = f"reg:{request.remote_addr}"
+    if throttled(rkey):
+        return jsonify({"error": "Demasiados intentos. Espera unos minutos."}), 429
+    register_fail(rkey, limit=10, block=600)   # cuenta cada intento de registro por IP
     with db() as conn:
         first = conn.execute("SELECT COUNT(*) AS n FROM users").fetchone()["n"] == 0
         code, open_ = invite_settings(conn)
@@ -852,8 +955,11 @@ def valid_parent(conn, u, parent_id, kind, self_id=None):
 @login_required
 def create_category():
     d = body()
-    if not (d.get("name") or "").strip() or d.get("kind") not in ("expense", "income"):
+    name = parse_text(d.get("name"), 60)
+    if not name or d.get("kind") not in ("expense", "income"):
         return jsonify({"error": "Nombre y tipo requeridos"}), 400
+    icon = parse_icon(d.get("icon"), "💸")
+    budget = parse_optional_amount(d.get("budget"), "Límite inválido")
     with db() as conn:
         parent = None
         if d.get("parent_id"):
@@ -862,14 +968,14 @@ def create_category():
                 return jsonify({"error": "La categoría principal no es válida"}), 400
             color = parent["color"]          # la subcategoría hereda el color
         else:
-            color = d.get("color") or first_free_color(conn, uid())
+            color = parse_color(d.get("color"), None) or first_free_color(conn, uid())
             if color_taken(conn, uid(), color):
                 return jsonify({"error": "Ese color ya lo usa otra categoría"}), 409
         row = conn.execute(
             f"""INSERT INTO categories(user_id,name,icon,color,kind,budget,parent_id)
                VALUES (%s,%s,%s,%s,%s,%s,%s) RETURNING {CAT_COLS}""",
-            (uid(), d["name"].strip(), d.get("icon") or "💸", color, d["kind"],
-             d.get("budget") or None, parent["id"] if parent else None),
+            (uid(), name, icon, color, d["kind"],
+             budget, parent["id"] if parent else None),
         ).fetchone()
     return jsonify(clean([row])[0]), 201
 
@@ -878,6 +984,12 @@ def create_category():
 @login_required
 def update_category(cid):
     d = body()
+    name = parse_text(d.get("name"), 60) if "name" in d else None
+    if "name" in d and not name:
+        return jsonify({"error": "El nombre no puede estar vacío"}), 400
+    icon = parse_icon(d.get("icon"), None)
+    new_color = parse_color(d.get("color"), None)
+    budget = parse_optional_amount(d.get("budget"), "Límite inválido")
     with db() as conn:
         cur = conn.execute(
             "SELECT id,color,kind,parent_id FROM categories WHERE id=%s AND user_id=%s", (cid, uid())
@@ -894,8 +1006,8 @@ def update_category(cid):
                 return jsonify({"error": "La categoría principal no es válida"}), 400
             color = parent["color"]
         else:
-            color = d.get("color") or cur["color"]
-            if cur["parent_id"] and not d.get("color"):
+            color = new_color or cur["color"]
+            if cur["parent_id"] and not new_color:
                 color = first_free_color(conn, uid(), cid)      # deja de ser subcategoría: necesita color propio
             if color.lower() != (cur["color"] or "").lower() or cur["parent_id"]:
                 if color_taken(conn, uid(), color, cid):
@@ -908,7 +1020,7 @@ def update_category(cid):
                 f"""UPDATE categories SET name=COALESCE(%s,name), icon=COALESCE(%s,icon),
                    color=%s, budget=%s, parent_id=%s WHERE id=%s AND user_id=%s
                    RETURNING {CAT_COLS}""",
-                (d.get("name"), d.get("icon"), color, d.get("budget") or None, parent_id or None, cid, uid()),
+                (name, icon, color, budget, parent_id or None, cid, uid()),
             ).fetchone()
             # las subcategorías siempre llevan el color de su principal
             conn.execute("UPDATE categories SET color=%s WHERE parent_id=%s", (color, cid))
@@ -930,11 +1042,11 @@ def delete_category(cid):
 @app.put("/api/categories/<int:cid>/budget")
 @login_required
 def set_category_budget(cid):
-    v = body().get("budget")
+    v = parse_optional_amount(body().get("budget"), "Límite inválido")
     with db() as conn:
         row = conn.execute(
             "UPDATE categories SET budget=%s WHERE id=%s AND user_id=%s AND kind='expense' RETURNING id",
-            (v or None, cid, uid()),
+            (v, cid, uid()),
         ).fetchone()
     if not row:
         return jsonify({"error": "no encontrada"}), 404
@@ -949,8 +1061,8 @@ def set_category_budget(cid):
 def list_transactions():
     u = uid()
     q = (request.args.get("q") or "").strip()
-    dfrom = request.args.get("from") or None
-    dto = request.args.get("to") or None
+    dfrom = parse_date(request.args.get("from"))
+    dto = parse_date(request.args.get("to"))
     kind = request.args.get("kind") if request.args.get("kind") in ("expense", "income") else None
     searching = bool(q or dfrom or dto or kind)
 
@@ -967,17 +1079,17 @@ def list_transactions():
             cond = "(t.note ILIKE %s OR c.name ILIKE %s OR p.name ILIKE %s"
             params += [like, like, like]
             try:
-                amt = Decimal(q.replace(",", "."))
+                amt = parse_amount(q)
                 cond += " OR t.amount = %s"
-                params.append(amt)
-            except Exception:
+                params.append(abs(amt))
+            except BadInput:
                 pass
             where.append(cond + ")")
         limit = "LIMIT 500"
     else:
         with db() as conn:
             ms = user_settings(conn, u)["month_start"]
-        ym = request.args.get("month") or current_period_key(ms)
+        ym = parse_key(request.args.get("month"), current_period_key(ms))
         start, end = period_range(ym, ms)
         where += ["t.tx_date >= %s", "t.tx_date < %s", "NOT (t.kind='expense' AND t.recurring_id IS NOT NULL)"]
         params += [start, end]
@@ -998,26 +1110,23 @@ def list_transactions():
 
 
 def tx_payload(d):
-    amount = Decimal(str(d["amount"]))
-    if amount <= 0 or d.get("kind") not in ("expense", "income"):
-        raise ValueError
-    return amount
+    if d.get("kind") not in ("expense", "income"):
+        raise BadInput("Tipo inválido")
+    amount = parse_amount(d.get("amount"))
+    return amount, parse_date(d.get("tx_date"), today()), parse_text(d.get("note"))
 
 
 @app.post("/api/transactions")
 @login_required
 def create_transaction():
     d = body()
-    try:
-        amount = tx_payload(d)
-    except Exception:
-        return jsonify({"error": "datos inválidos"}), 400
+    amount, tx_date, note = tx_payload(d)
     with db() as conn:
         row = conn.execute(
             """INSERT INTO transactions(user_id,kind,amount,category_id,note,tx_date)
                VALUES (%s,%s,%s,%s,%s,%s) RETURNING id""",
             (uid(), d["kind"], amount, own_category(conn, uid(), d.get("category_id")),
-             d.get("note", ""), d.get("tx_date") or today()),
+             note, tx_date),
         ).fetchone()
     return jsonify(row), 201
 
@@ -1026,16 +1135,13 @@ def create_transaction():
 @login_required
 def update_transaction(tid):
     d = body()
-    try:
-        amount = tx_payload(d)
-    except Exception:
-        return jsonify({"error": "datos inválidos"}), 400
+    amount, tx_date, note = tx_payload(d)
     with db() as conn:
         row = conn.execute(
             """UPDATE transactions SET kind=%s, amount=%s, category_id=%s, note=%s, tx_date=%s
                WHERE id=%s AND user_id=%s RETURNING id""",
             (d["kind"], amount, own_category(conn, uid(), d.get("category_id")),
-             d.get("note", ""), d.get("tx_date") or today(), tid, uid()),
+             note, tx_date, tid, uid()),
         ).fetchone()
     if not row:
         return jsonify({"error": "no encontrada"}), 404
@@ -1061,7 +1167,7 @@ def summary():
     with db() as conn:
         st = user_settings(conn, u)
         ms = st["month_start"]
-        ym = request.args.get("month") or current_period_key(ms)
+        ym = parse_key(request.args.get("month"), current_period_key(ms))
         start, end = period_range(ym, ms)
         pkey = shift_key(ym, -1)
         pstart, _ = period_range(pkey, ms)
@@ -1228,7 +1334,8 @@ def year_view():
     u = uid()
     try:
         y = int(request.args.get("y") or today().year)
-    except ValueError:
+        assert 1900 <= y <= 2999
+    except Exception:
         return jsonify({"error": "año inválido"}), 400
     with db() as conn:
         ms = user_settings(conn, u)["month_start"]
@@ -1276,12 +1383,17 @@ def year_view():
 # Recurrentes
 # =====================================================================
 def rec_payload(d):
-    amount = Decimal(str(d["amount"]))
-    day = int(d["day"])
-    every = int(d.get("every") or 1)
-    if amount <= 0 or not 1 <= day <= 31 or not 1 <= every <= 12 or d.get("kind") not in ("expense", "income"):
-        raise ValueError
-    return amount, day, every
+    if d.get("kind") not in ("expense", "income"):
+        raise BadInput("Tipo inválido")
+    amount = parse_amount(d.get("amount"))
+    try:
+        day = int(d.get("day"))
+        every = int(d.get("every") or 1)
+    except Exception:
+        raise BadInput("Datos inválidos")
+    if not 1 <= day <= 31 or not 1 <= every <= 12:
+        raise BadInput("Datos inválidos")
+    return amount, day, every, parse_text(d.get("note"))
 
 
 @app.get("/api/recurring")
@@ -1318,16 +1430,14 @@ def list_recurring():
 @login_required
 def create_recurring():
     d = body()
-    try:
-        amount, day, every = rec_payload(d)
-    except Exception:
-        return jsonify({"error": "datos inválidos"}), 400
+    amount, day, every, note = rec_payload(d)
+    start_date = parse_date(d.get("start_date"), today())
     with db() as conn:
         row = conn.execute(
             """INSERT INTO recurring(user_id,kind,amount,category_id,note,day,every,start_date)
                VALUES (%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
-            (uid(), d["kind"], amount, own_category(conn, uid(), d.get("category_id")), d.get("note", ""),
-             day, every, d.get("start_date") or today()),
+            (uid(), d["kind"], amount, own_category(conn, uid(), d.get("category_id")), note,
+             day, every, start_date),
         ).fetchone()
         materialize(conn, uid())
     return jsonify(row), 201
@@ -1337,15 +1447,12 @@ def create_recurring():
 @login_required
 def update_recurring(rid):
     d = body()
-    try:
-        amount, day, every = rec_payload(d)
-    except Exception:
-        return jsonify({"error": "datos inválidos"}), 400
+    amount, day, every, note = rec_payload(d)
     with db() as conn:
         row = conn.execute(
             """UPDATE recurring SET kind=%s, amount=%s, category_id=%s, note=%s, day=%s, every=%s
                WHERE id=%s AND user_id=%s RETURNING id""",
-            (d["kind"], amount, own_category(conn, uid(), d.get("category_id")), d.get("note", ""),
+            (d["kind"], amount, own_category(conn, uid(), d.get("category_id")), note,
              day, every, rid, uid()),
         ).fetchone()
         if row:
@@ -1370,16 +1477,11 @@ def delete_recurring(rid):
 @app.put("/api/limit")
 @login_required
 def set_monthly_limit():
-    v = body().get("amount")
+    val = parse_optional_amount(body().get("amount"))
     with db() as conn:
-        if v in (None, "", 0):
+        if val is None:
             conn.execute("DELETE FROM user_settings WHERE user_id=%s AND key='monthly_limit'", (uid(),))
         else:
-            try:
-                val = Decimal(str(v))
-                assert val > 0
-            except Exception:
-                return jsonify({"error": "importe inválido"}), 400
             conn.execute(
                 """INSERT INTO user_settings(user_id,key,value) VALUES (%s,'monthly_limit',%s)
                    ON CONFLICT (user_id,key) DO UPDATE SET value=EXCLUDED.value""",
@@ -1392,11 +1494,12 @@ def set_monthly_limit():
 # Metas de ahorro
 # =====================================================================
 def goal_payload(d):
-    name = (d.get("name") or "").strip()
-    target = Decimal(str(d["target"]))
-    if not name or target <= 0:
-        raise ValueError
-    return name, target
+    name = parse_text(d.get("name"), 60)
+    if not name:
+        raise BadInput("Pon un nombre y un objetivo")
+    target = parse_amount(d.get("target"), msg="Pon un nombre y un objetivo")
+    return (name, target, parse_icon(d.get("icon"), "🎯"), parse_color(d.get("color"), "#2ecc8f"),
+            parse_date(d.get("deadline")))
 
 
 @app.get("/api/goals")
@@ -1416,16 +1519,12 @@ def list_goals():
 @app.post("/api/goals")
 @login_required
 def create_goal():
-    d = body()
-    try:
-        name, target = goal_payload(d)
-    except Exception:
-        return jsonify({"error": "Pon un nombre y un objetivo"}), 400
+    name, target, icon, color, deadline = goal_payload(body())
     with db() as conn:
         row = conn.execute(
             """INSERT INTO goals(user_id,name,icon,color,target,deadline)
                VALUES (%s,%s,%s,%s,%s,%s) RETURNING id""",
-            (uid(), name, d.get("icon") or "🎯", d.get("color") or "#2ecc8f", target, d.get("deadline") or None),
+            (uid(), name, icon, color, target, deadline),
         ).fetchone()
     return jsonify(row), 201
 
@@ -1433,16 +1532,12 @@ def create_goal():
 @app.put("/api/goals/<int:gid>")
 @login_required
 def update_goal(gid):
-    d = body()
-    try:
-        name, target = goal_payload(d)
-    except Exception:
-        return jsonify({"error": "Pon un nombre y un objetivo"}), 400
+    name, target, icon, color, deadline = goal_payload(body())
     with db() as conn:
         row = conn.execute(
             """UPDATE goals SET name=%s, icon=%s, color=%s, target=%s, deadline=%s
                WHERE id=%s AND user_id=%s RETURNING id""",
-            (name, d.get("icon") or "🎯", d.get("color") or "#2ecc8f", target, d.get("deadline") or None, gid, uid()),
+            (name, icon, color, target, deadline, gid, uid()),
         ).fetchone()
     if not row:
         return jsonify({"error": "no encontrada"}), 404
@@ -1460,12 +1555,7 @@ def delete_goal(gid):
 @app.post("/api/goals/<int:gid>/move")
 @login_required
 def goal_move(gid):
-    d = body()
-    try:
-        amount = Decimal(str(d["amount"]))
-        assert amount != 0
-    except Exception:
-        return jsonify({"error": "Importe inválido"}), 400
+    amount = parse_amount(body().get("amount"), allow_negative=True)
     with db() as conn:
         g = conn.execute(
             """SELECT g.id, COALESCE(SUM(m.amount),0) AS saved FROM goals g

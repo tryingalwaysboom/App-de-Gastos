@@ -791,8 +791,8 @@ async function loadMe(){
   setCurFromKey(me.current_period);
   fillSettings();
   $('#adminCard').style.display = me.is_admin ? 'block' : 'none';
+  if (me.must_change_pw){ openPwForced(); return; }
   if (me.is_admin) loadAdmin();
-  if (me.must_change_pw) openPwForced();
 }
 
 /* ---- Preferencias ---- */
@@ -921,7 +921,8 @@ $('#pwBtn').onclick = ()=>{ $('#pwTitle').textContent='Cambiar contraseña'; $('
 $('#savePw').onclick = async ()=>{
   try{
     await api('/api/me/password',{method:'PUT',body:JSON.stringify({current:$('#pwCur').value,new:$('#pwNew').value})});
-    closeSheets(); toast('Contraseña cambiada'); if (me) me.must_change_pw = false;
+    if (me && me.must_change_pw){ location.reload(); return; }
+    closeSheets(); toast('Contraseña cambiada');
   }catch(e){toast(e.message)}
 };
 let installEvt = null;
@@ -1395,7 +1396,7 @@ document.querySelector('main').addEventListener('touchend',e=>{
 
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 
-(async()=>{ try{ cfg = await api('/api/config'); COLORS = cfg.palette || []; await loadMe(); await load(); }catch(e){ if (e.message!=='Sesión caducada') toast(e.message); } })();
+(async()=>{ try{ cfg = await api('/api/config'); COLORS = cfg.palette || []; await loadMe(); if (!me.must_change_pw) await load(); }catch(e){ if (e.message!=='Sesión caducada') toast(e.message); } })();
 </script>
 </body>
 </html>
