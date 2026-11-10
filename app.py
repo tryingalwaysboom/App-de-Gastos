@@ -1,4 +1,6 @@
+import hmac
 import io
+import json
 import os
 import re
 import time
@@ -24,6 +26,16 @@ LOCALE = os.environ.get("LOCALE", "es-ES")
 TZ = ZoneInfo(os.environ.get("TZ_NAME", "Europe/Andorra"))
 INVITE_CODE = os.environ.get("INVITE_CODE", "").strip()
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Suscripción (Hotmart)
+PAYWALL = os.environ.get("PAYWALL", "0") == "1"
+HOTMART_HOTTOK = os.environ.get("HOTMART_HOTTOK", "").strip()
+HOTMART_CHECKOUT_URL = os.environ.get("HOTMART_CHECKOUT_URL", "").strip()
+HOTMART_PRODUCT_ID = os.environ.get("HOTMART_PRODUCT_ID", "").strip()
+HOTMART_MANAGE_URL = os.environ.get("HOTMART_MANAGE_URL", "https://consumer.hotmart.com").strip()
+PRICE_LABEL = os.environ.get("PRICE_LABEL", "4,99 €/mes").strip()
+BILLING_DAYS = int(os.environ.get("BILLING_DAYS", "31"))
+BILLING_GRACE_DAYS = int(os.environ.get("BILLING_GRACE_DAYS", "3"))
 
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
@@ -146,6 +158,27 @@ def init_db():
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS must_change_pw BOOLEAN NOT NULL DEFAULT FALSE;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS session_version INTEGER NOT NULL DEFAULT 1;
                 ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ;
+                -- Suscripción
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS paid_until TIMESTAMPTZ;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS sub_status TEXT;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS sub_code TEXT;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS sub_email TEXT;
+                ALTER TABLE users ADD COLUMN IF NOT EXISTS free_access BOOLEAN NOT NULL DEFAULT FALSE;
+                CREATE TABLE IF NOT EXISTS payments (
+                    id SERIAL PRIMARY KEY,
+                    event_key TEXT UNIQUE NOT NULL,
+                    event TEXT NOT NULL,
+                    transaction TEXT,
+                    subscriber_code TEXT,
+                    email TEXT,
+                    event_at TIMESTAMPTZ NOT NULL,
+                    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    payload JSONB,
+                    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+                );
+                CREATE INDEX IF NOT EXISTS idx_pay_user ON payments(user_id);
+                CREATE INDEX IF NOT EXISTS idx_pay_sub ON payments(subscriber_code);
+                CREATE INDEX IF NOT EXISTS idx_pay_tx ON payments(transaction);
                 UPDATE users SET is_admin=TRUE
                     WHERE id=(SELECT MIN(id) FROM users) AND NOT EXISTS (SELECT 1 FROM users WHERE is_admin);
             """)
@@ -448,7 +481,8 @@ def load_user():
         return None
     with db() as conn:
         row = conn.execute(
-            "SELECT id,username,is_admin,must_change_pw,session_version FROM users WHERE id=%s", (uid(),)
+            """SELECT id,username,is_admin,must_change_pw,session_version,paid_until,sub_status,free_access
+               FROM users WHERE id=%s""", (uid(),)
         ).fetchone()
         if row and row["session_version"] == session.get("sv", 1):
             conn.execute(
@@ -462,6 +496,14 @@ def load_user():
 
 # Con contraseña temporal solo se puede consultar la cuenta, cambiar la clave o salir
 PW_CHANGE_ALLOWED = {"me", "change_password", "logout"}
+# Sin suscripción activa solo se puede ver la cuenta, suscribirse o salir
+PAYWALL_ALLOWED = PW_CHANGE_ALLOWED | {"billing_status", "billing_claim", "save_settings"}
+
+
+def has_access(u):
+    if not PAYWALL or u["is_admin"] or u["free_access"]:
+        return True
+    return bool(u["paid_until"] and u["paid_until"] > datetime.now(TZ))
 
 
 def login_required(f):
@@ -472,6 +514,8 @@ def login_required(f):
             return jsonify({"error": "no autenticado"}), 401
         if g.user["must_change_pw"] and request.endpoint not in PW_CHANGE_ALLOWED:
             return jsonify({"error": "Cambia tu contraseña temporal para continuar"}), 403
+        if request.endpoint not in PAYWALL_ALLOWED and not has_access(g.user):
+            return jsonify({"error": "Necesitas una suscripción activa", "paywall": True}), 402
         return f(*a, **kw)
     return wrapper
 
@@ -609,6 +653,7 @@ def me():
         "username": g.user["username"],
         "is_admin": g.user["is_admin"],
         "must_change_pw": g.user["must_change_pw"],
+        "billing": billing_info(g.user),
         "settings": st,
         "current_period": current_period_key(st["month_start"]),
     })
@@ -676,18 +721,22 @@ def admin_users():
     with db() as conn:
         rows = conn.execute(
             """SELECT u.id,u.username,u.is_admin,u.must_change_pw,u.created_at,u.last_seen,
+                      u.paid_until,u.sub_status,u.free_access,
                       (SELECT COUNT(*) FROM transactions t WHERE t.user_id=u.id) AS tx_count
                FROM users u ORDER BY u.id"""
         ).fetchall()
         code, open_ = invite_settings(conn)
     out = []
+    rows = [dict(r) for r in rows]
     for r in rows:
         r = dict(r)
         r["created_at"] = r["created_at"].isoformat() if r["created_at"] else None
         r["last_seen"] = r["last_seen"].isoformat() if r["last_seen"] else None
+        r["has_access"] = has_access(r)
+        r["paid_until"] = r["paid_until"].isoformat() if r["paid_until"] else None
         r["is_me"] = r["id"] == g.user["id"]
         out.append(r)
-    return jsonify({"users": out, "invite_code": code, "registration_open": open_})
+    return jsonify({"users": out, "invite_code": code, "registration_open": open_, "paywall": PAYWALL})
 
 
 def readable_password(n=10):
@@ -725,6 +774,17 @@ def admin_toggle(target):
     return jsonify({"ok": True})
 
 
+@app.put("/api/admin/users/<int:target>/free")
+@admin_required
+def admin_free_access(target):
+    free = bool(body().get("free_access"))
+    with db() as conn:
+        row = conn.execute("UPDATE users SET free_access=%s WHERE id=%s RETURNING id", (free, target)).fetchone()
+    if not row:
+        return jsonify({"error": "Usuario no encontrado"}), 404
+    return jsonify({"ok": True})
+
+
 @app.delete("/api/admin/users/<int:target>")
 @admin_required
 def admin_delete_user(target):
@@ -756,6 +816,187 @@ def admin_settings():
             set_meta(conn, "registration_open", "1" if d["registration_open"] else "0")
         code, open_ = invite_settings(conn)
     return jsonify({"invite_code": code, "registration_open": open_})
+
+
+# =====================================================================
+# Suscripción (Hotmart)
+# =====================================================================
+APPROVED_EVENTS = {"PURCHASE_APPROVED", "PURCHASE_COMPLETE"}
+REVOKE_EVENTS = {"PURCHASE_REFUNDED", "PURCHASE_CHARGEBACK"}
+STATUS_BY_EVENT = {
+    "PURCHASE_APPROVED": "active", "PURCHASE_COMPLETE": "active",
+    "SUBSCRIPTION_CANCELLATION": "canceled",
+    "PURCHASE_REFUNDED": "refunded", "PURCHASE_CHARGEBACK": "refunded",
+    "PURCHASE_DELAYED": "late", "PURCHASE_CANCELED": "payment_failed",
+    "PURCHASE_EXPIRED": "payment_failed", "PURCHASE_PROTEST": "dispute",
+}
+
+
+def checkout_url(user_id):
+    if not HOTMART_CHECKOUT_URL:
+        return None
+    sep = "&" if "?" in HOTMART_CHECKOUT_URL else "?"
+    return f"{HOTMART_CHECKOUT_URL}{sep}sck=mg{user_id}"
+
+
+def billing_info(u):
+    return {
+        "paywall": PAYWALL,
+        "active": has_access(u),
+        "exempt": bool(u["is_admin"] or u["free_access"]),
+        "status": u["sub_status"],
+        "paid_until": u["paid_until"].isoformat() if u["paid_until"] else None,
+        "checkout_url": checkout_url(u["id"]),
+        "manage_url": HOTMART_MANAGE_URL,
+        "price": PRICE_LABEL,
+    }
+
+
+def _dig(d, *path):
+    for k in path:
+        if not isinstance(d, dict):
+            return None
+        d = d.get(k)
+    return d
+
+
+def _ms_to_dt(v):
+    try:
+        return datetime.fromtimestamp(int(v) / 1000, TZ)
+    except Exception:
+        return None
+
+
+def recompute_subscription(conn, user_id):
+    """Recalcula acceso y estado a partir de todo el historial de eventos del usuario (idempotente)."""
+    rows = conn.execute(
+        "SELECT event,transaction,subscriber_code,email,event_at FROM payments WHERE user_id=%s ORDER BY id",
+        (user_id,),
+    ).fetchall()
+    revoked = {r["transaction"] for r in rows if r["event"] in REVOKE_EVENTS and r["transaction"]}
+    period = timedelta(days=BILLING_DAYS + BILLING_GRACE_DAYS)
+    paid_until, status, code, email = None, None, None, None
+    for r in rows:
+        if r["event"] in APPROVED_EVENTS and r["transaction"] not in revoked:
+            end = r["event_at"] + period
+            paid_until = end if not paid_until or end > paid_until else paid_until
+        status = STATUS_BY_EVENT.get(r["event"], status)
+        code = r["subscriber_code"] or code
+        email = r["email"] or email
+    conn.execute(
+        """UPDATE users SET paid_until=%s, sub_status=%s,
+                  sub_code=COALESCE(%s,sub_code), sub_email=COALESCE(%s,sub_email) WHERE id=%s""",
+        (paid_until, status, code, email, user_id),
+    )
+
+
+def match_user(conn, sck, code, email):
+    if sck and re.fullmatch(r"mg\d+", sck):
+        row = conn.execute("SELECT id FROM users WHERE id=%s", (int(sck[2:]),)).fetchone()
+        if row:
+            return row["id"]
+    if code:
+        row = conn.execute("SELECT id FROM users WHERE sub_code=%s ORDER BY id LIMIT 1", (code,)).fetchone()
+        if row:
+            return row["id"]
+        row = conn.execute(
+            "SELECT user_id FROM payments WHERE subscriber_code=%s AND user_id IS NOT NULL ORDER BY id DESC LIMIT 1", (code,)
+        ).fetchone()
+        if row:
+            return row["user_id"]
+    if email:
+        row = conn.execute("SELECT id FROM users WHERE sub_email=%s ORDER BY id LIMIT 1", (email,)).fetchone()
+        if row:
+            return row["id"]
+    return None
+
+
+@app.post("/webhooks/hotmart")
+def hotmart_webhook():
+    if not HOTMART_HOTTOK:
+        return jsonify({"error": "webhook sin configurar"}), 503
+    raw = request.get_data(cache=True)
+    try:
+        p = json.loads(raw or b"{}")
+    except ValueError:
+        return jsonify({"error": "json inválido"}), 400
+    if not isinstance(p, dict):
+        return jsonify({"error": "json inválido"}), 400
+    token = request.headers.get("X-HOTMART-HOTTOK") or p.get("hottok") or ""
+    if not hmac.compare_digest(str(token), HOTMART_HOTTOK):
+        return jsonify({"error": "token inválido"}), 401
+
+    event = str(p.get("event") or "").upper()
+    data = p.get("data") if isinstance(p.get("data"), dict) else {}
+    product = str(_dig(data, "product", "id") or "")
+    if HOTMART_PRODUCT_ID and product and product != HOTMART_PRODUCT_ID:
+        return jsonify({"ok": True, "ignored": "otro producto"})
+    if event not in STATUS_BY_EVENT:
+        return jsonify({"ok": True, "ignored": event})
+
+    tx = _dig(data, "purchase", "transaction")
+    code = _dig(data, "subscription", "subscriber", "code") or _dig(data, "subscriber", "code")
+    email = (_dig(data, "buyer", "email") or _dig(data, "subscriber", "email") or "").strip().lower() or None
+    sck = _dig(data, "purchase", "origin", "sck") or _dig(data, "purchase", "origin", "src")
+    when = (_ms_to_dt(_dig(data, "purchase", "approved_date")) if event in APPROVED_EVENTS else None) \
+        or _ms_to_dt(p.get("creation_date")) or datetime.now(TZ)
+    key = str(p.get("id") or "") or f"{event}:{tx or ''}:{code or ''}:{int(when.timestamp())}"
+
+    with db() as conn:
+        with conn.transaction():
+            user_id = match_user(conn, sck, code, email)
+            row = conn.execute(
+                """INSERT INTO payments(event_key,event,transaction,subscriber_code,email,event_at,user_id,payload)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s) ON CONFLICT (event_key) DO NOTHING RETURNING id""",
+                (key, event, tx, code, email, when, user_id, json.dumps(p)),
+            ).fetchone()
+            if row and user_id:
+                # vincula también eventos anteriores de la misma suscripción que llegaron sin usuario
+                if code:
+                    conn.execute("UPDATE payments SET user_id=%s WHERE user_id IS NULL AND subscriber_code=%s", (user_id, code))
+                recompute_subscription(conn, user_id)
+    return jsonify({"ok": True, "matched": bool(user_id)})
+
+
+@app.get("/api/billing")
+@login_required
+def billing_status():
+    return jsonify(billing_info(g.user))
+
+
+@app.post("/api/billing/claim")
+@login_required
+def billing_claim():
+    """Para quien pagó antes de crear la cuenta: vincula la compra con el código de transacción y el email."""
+    d = body()
+    tx = parse_text(d.get("transaction"), 64).upper()
+    email = parse_text(d.get("email"), 200).lower()
+    key = f"claim:{request.remote_addr}"
+    if throttled(key):
+        return jsonify({"error": "Demasiados intentos. Espera unos minutos."}), 429
+    if not tx or not email:
+        return jsonify({"error": "Escribe el código de la compra y el email con el que pagaste"}), 400
+    with db() as conn:
+        with conn.transaction():
+            row = conn.execute(
+                "SELECT subscriber_code,user_id FROM payments WHERE UPPER(transaction)=%s AND email=%s ORDER BY id LIMIT 1",
+                (tx, email),
+            ).fetchone()
+            if not row:
+                register_fail(key, limit=8, block=600)
+                return jsonify({"error": "No encontramos esa compra. Revisa el código (empieza por HP) y el email."}), 404
+            if row["user_id"] and row["user_id"] != g.user["id"]:
+                return jsonify({"error": "Esa compra ya está vinculada a otra cuenta"}), 409
+            conn.execute(
+                """UPDATE payments SET user_id=%s WHERE user_id IS NULL AND
+                   (UPPER(transaction)=%s OR (subscriber_code IS NOT NULL AND subscriber_code=%s))""",
+                (g.user["id"], tx, row["subscriber_code"]),
+            )
+            recompute_subscription(conn, g.user["id"])
+            u = conn.execute(
+                "SELECT id,is_admin,paid_until,sub_status,free_access FROM users WHERE id=%s", (g.user["id"],)
+            ).fetchone()
+    return jsonify(billing_info(u))
 
 
 # =====================================================================

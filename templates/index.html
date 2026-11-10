@@ -231,6 +231,28 @@ input[type=date].field{min-width:0;-webkit-appearance:none;appearance:none}
 select.field{appearance:none;-webkit-appearance:none;background-image:linear-gradient(45deg,transparent 50%,var(--muted) 50%),linear-gradient(135deg,var(--muted) 50%,transparent 50%);background-position:calc(100% - 18px) 55%,calc(100% - 13px) 55%;background-size:5px 5px;background-repeat:no-repeat;padding-right:34px}
 .badge{display:inline-block;font-size:10px;font-weight:800;padding:2px 6px;border-radius:6px;margin-left:6px;vertical-align:1px;background:var(--accent);color:#fff}
 .badge.warn{background:var(--warn)}
+.badge.ok{background:var(--income)}
+.badge.off{background:var(--surface2);color:var(--muted)}
+/* Pantalla de suscripción */
+.paywall{position:fixed;inset:0;z-index:45;background:var(--bg);overflow-y:auto;display:none;padding:28px 0 40px}
+.paywall.on{display:block}
+body.pw-lock{overflow:hidden}
+body.pw-lock nav.bottom,body.pw-lock header,body.pw-lock main{display:none}
+.pw-logo{width:76px;height:76px;border-radius:22px;margin:10px auto 0;display:block;box-shadow:0 18px 40px -16px rgba(124,92,255,.7)}
+.paywall h2{text-align:center;font-size:24px;margin-top:18px;line-height:1.2}
+.pw-sub{text-align:center;color:var(--muted);margin-top:8px;font-size:15px}
+.pw-price{text-align:center;margin-top:18px;font-size:30px;font-weight:800}
+.pw-price small{font-size:15px;font-weight:600;color:var(--muted)}
+.pw-list{list-style:none;margin-top:18px}
+.pw-list li{display:flex;gap:12px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--line);font-size:15px}
+.pw-list li:last-child{border-bottom:none}
+.pw-list li span{font-size:20px;line-height:1}
+.pw-note{margin-top:14px;padding:12px 14px;border-radius:14px;background:var(--surface2);font-size:14px;display:none}
+.pw-note.on{display:block}
+.pw-link{display:block;width:100%;text-align:center;color:var(--accent2);font-weight:700;font-size:14px;margin-top:16px;padding:6px}
+.pw-claim{display:none}
+.pw-claim.on{display:block}
+.subline{font-size:14px;color:var(--muted);margin:2px 0 6px}
 .temp{font-family:ui-monospace,Menlo,monospace;font-size:26px;font-weight:700;letter-spacing:2px;text-align:center;background:var(--surface2);border-radius:14px;padding:18px;margin-top:6px;user-select:all}
 .inl{display:flex;gap:8px}.inl .field{flex:1;min-width:0}
 .inl .btn{width:auto;margin-top:0;padding:0 18px}
@@ -397,6 +419,11 @@ select.field{appearance:none;-webkit-appearance:none;background-image:linear-gra
       <h2>Cuenta</h2>
       <div class="lg"><div class="avatar" id="avatar">·</div>
         <div class="nm"><span id="userName">—</span><small>Tus datos solo los ves tú</small></div></div>
+      <div id="subBox" style="display:none">
+        <div class="label">Suscripción</div>
+        <div class="subline" id="subLine">—</div>
+        <button class="btn soft" id="subManage" style="margin-top:4px">Gestionar o cancelar suscripción</button>
+      </div>
       <button class="btn soft" id="installBtn" style="display:none">📲 Instalar en el móvil</button>
       <button class="btn soft" id="pwBtn">Cambiar contraseña</button>
       <button class="btn ghost" id="logoutBtn">Cerrar sesión</button>
@@ -555,6 +582,7 @@ select.field{appearance:none;-webkit-appearance:none;background-image:linear-gra
     <div class="hintline" id="uInfo" style="margin-top:0"></div>
     <button class="btn soft" id="uReset">🔑 Resetear contraseña</button>
     <button class="btn soft" id="uAdmin">Hacer administrador</button>
+    <button class="btn soft" id="uFree" style="display:none">🎁 Dar acceso gratis</button>
     <button class="btn ghost" id="uDelete">Borrar cuenta y todos sus datos</button>
   </div>
 </div>
@@ -567,6 +595,37 @@ select.field{appearance:none;-webkit-appearance:none;background-image:linear-gra
     <div class="temp" id="tempPw">—</div>
     <button class="btn" id="tempCopy">Copiar</button>
     <div class="hintline">Pásasela a la persona. Al entrar, la app le pedirá que elija una nueva. Sus sesiones abiertas se han cerrado.</div>
+  </div>
+</div>
+
+<!-- Pantalla de suscripción -->
+<div class="paywall" id="paywall">
+  <div class="wrap">
+    <img class="pw-logo" src="/icon/192.png" alt="">
+    <h2>Toma el control de tu dinero</h2>
+    <p class="pw-sub">Activa tu suscripción para usar Mis Gastos</p>
+    <div class="pw-price" id="pwPrice">—</div>
+    <ul class="pw-list">
+      <li><span>⚡</span><div>Apunta un gasto en 2 segundos</div></li>
+      <li><span>💸</span><div>Sabes cuánto te queda y cuánto puedes gastar al día</div></li>
+      <li><span>🎯</span><div>Límites por categoría y metas de ahorro</div></li>
+      <li><span>🔁</span><div>Tus pagos fijos se apuntan solos</div></li>
+      <li><span>🔒</span><div>Sin conectar tu banco · cancela cuando quieras</div></li>
+    </ul>
+    <div class="pw-note" id="pwNote"></div>
+    <button class="btn" id="pwBuy">Suscribirme</button>
+    <button class="btn soft" id="pwCheck">Ya he pagado · comprobar</button>
+    <button class="pw-link" id="pwClaimToggle">¿Pagaste antes de crear tu cuenta?</button>
+    <div class="pw-claim" id="pwClaim">
+      <div class="hintline" style="margin-top:0">Escribe el código de la compra (empieza por HP, lo tienes en el email de Hotmart) y el email con el que pagaste.</div>
+      <div class="label">Código de la compra</div>
+      <input class="field" id="pwTx" autocapitalize="characters" spellcheck="false" placeholder="HP0000000000">
+      <div class="label">Email de la compra</div>
+      <input class="field" id="pwEmail" type="email" autocapitalize="none" spellcheck="false" placeholder="tu@email.com">
+      <button class="btn soft" id="pwClaimBtn">Vincular compra</button>
+    </div>
+    <button class="pw-link" id="pwManage" style="display:none">Gestionar suscripción en Hotmart</button>
+    <button class="pw-link" id="pwLogout" style="color:var(--muted)">Cerrar sesión</button>
   </div>
 </div>
 
@@ -621,6 +680,7 @@ const fmt = n => new Intl.NumberFormat(cfg.locale,{style:'currency',currency:cfg
 const api = async (url, opts={}) => {
   const r = await fetch(url, {headers:{'Content-Type':'application/json','X-Requested-With':'fetch'}, ...opts});
   if (r.status === 401){ location.href = '/login'; throw new Error('Sesión caducada'); }
+  if (r.status === 402){ refreshBilling(true); throw new Error('Necesitas una suscripción activa'); }
   if (!r.ok && r.status !== 204) throw new Error((await r.json().catch(()=>({}))).error || 'Error');
   return r.status === 204 ? null : r.json();
 };
@@ -791,9 +851,73 @@ async function loadMe(){
   setCurFromKey(me.current_period);
   fillSettings();
   $('#adminCard').style.display = me.is_admin ? 'block' : 'none';
+  renderSubBox();
   if (me.must_change_pw){ openPwForced(); return; }
+  if (!me.billing.active){ showPaywall(); return; }
   if (me.is_admin) loadAdmin();
 }
+
+/* ---- Suscripción ---- */
+const fdate = iso => new Date(iso).toLocaleDateString(cfg.locale,{day:'numeric',month:'long',year:'numeric'});
+function subText(b){
+  if (b.exempt) return me.is_admin ? 'Administrador · acceso completo' : 'Acceso gratuito concedido';
+  const until = b.paid_until ? fdate(b.paid_until) : null;
+  if (b.active && b.status === 'canceled') return `Cancelada · tienes acceso hasta el ${until}`;
+  if (b.active && b.status === 'late') return `Pago pendiente · acceso hasta el ${until}`;
+  if (b.active) return `Activa · ${b.price} · próxima renovación hacia el ${until}`;
+  return 'Sin suscripción activa';
+}
+function renderSubBox(){
+  const b = me.billing;
+  $('#subBox').style.display = b.paywall ? 'block' : 'none';
+  $('#subLine').textContent = subText(b);
+  $('#subManage').style.display = b.exempt ? 'none' : 'block';
+}
+$('#subManage').onclick = ()=>window.open(me.billing.manage_url,'_blank','noopener');
+
+const PW_MSG = {
+  canceled:'Tu suscripción se canceló y el periodo pagado ha terminado. Suscríbete de nuevo para seguir.',
+  refunded:'Tu último pago fue devuelto. Suscríbete de nuevo para seguir usando la app.',
+  payment_failed:'No se pudo cobrar la renovación. Revisa tu tarjeta en Hotmart o suscríbete de nuevo.',
+  late:'Tu pago está pendiente. En cuanto se cobre, se activará solo.',
+  dispute:'Hay una reclamación abierta sobre tu pago. Revísala en Hotmart.'
+};
+function showPaywall(){
+  const b = me.billing;
+  closeSheets();
+  $('#pwPrice').innerHTML = esc(b.price).replace(/\/(.+)$/,'<small>/$1</small>');
+  const msg = PW_MSG[b.status];
+  $('#pwNote').textContent = msg || ''; $('#pwNote').classList.toggle('on', !!msg);
+  $('#pwBuy').textContent = `Suscribirme · ${b.price}`;
+  $('#pwBuy').disabled = !b.checkout_url; $('#pwBuy').style.opacity = b.checkout_url ? 1 : .5;
+  $('#pwManage').style.display = b.status ? 'block' : 'none';
+  $('#paywall').classList.add('on'); document.body.classList.add('pw-lock');
+}
+async function refreshBilling(fromBlock){
+  try{
+    const b = await (await fetch('/api/billing',{headers:{'X-Requested-With':'fetch'}})).json();
+    if (!me) return;
+    const was = me.billing.active; me.billing = b; renderSubBox();
+    if (b.active && $('#paywall').classList.contains('on')){ location.reload(); return true; }
+    if (!b.active && (fromBlock || was)) showPaywall();
+    return b.active;
+  }catch(e){ return false; }
+}
+$('#pwBuy').onclick = ()=>{ if (me.billing.checkout_url) window.open(me.billing.checkout_url,'_blank','noopener'); };
+$('#pwCheck').onclick = async ()=>{ if (!await refreshBilling()) toast('Aún no nos ha llegado el pago. Puede tardar unos minutos.'); };
+$('#pwManage').onclick = ()=>window.open(me.billing.manage_url,'_blank','noopener');
+$('#pwClaimToggle').onclick = ()=>$('#pwClaim').classList.toggle('on');
+$('#pwClaimBtn').onclick = async ()=>{
+  try{
+    const b = await api('/api/billing/claim',{method:'POST',body:JSON.stringify({transaction:$('#pwTx').value,email:$('#pwEmail').value})});
+    me.billing = b;
+    if (b.active){ toast('¡Suscripción activada!'); setTimeout(()=>location.reload(), 700); }
+    else { toast('Compra vinculada, pero el periodo pagado ya terminó'); showPaywall(); }
+  }catch(e){ toast(e.message); }
+};
+$('#pwLogout').onclick = async ()=>{ await api('/api/auth/logout',{method:'POST'}); location.href='/login'; };
+// al volver del pago, comprueba solo
+document.addEventListener('visibilitychange',()=>{ if (!document.hidden && $('#paywall').classList.contains('on')) refreshBilling(); });
 
 /* ---- Preferencias ---- */
 $('#setMonthStart').innerHTML = Array.from({length:28},(_,i)=>`<option value="${i+1}">${i+1}</option>`).join('');
@@ -861,7 +985,7 @@ function renderAdmin(){
   $('#adOpen').checked = adminData.registration_open;
   $('#adUsers').innerHTML = adminData.users.map(u=>`<button class="lg" data-id="${u.id}">
     <div class="avatar" style="width:38px;height:38px;font-size:15px;border-radius:12px">${esc(u.username[0])}</div>
-    <div class="nm">${esc(u.username)}${u.is_me?' <span style="color:var(--muted);font-weight:500">(tú)</span>':''}${u.is_admin?'<span class="badge">ADMIN</span>':''}${u.must_change_pw?'<span class="badge warn">CLAVE TEMPORAL</span>':''}
+    <div class="nm">${esc(u.username)}${u.is_me?' <span style="color:var(--muted);font-weight:500">(tú)</span>':''}${u.is_admin?'<span class="badge">ADMIN</span>':''}${u.must_change_pw?'<span class="badge warn">CLAVE TEMPORAL</span>':''}${adminData.paywall && !u.is_admin ? (u.free_access?'<span class="badge ok">GRATIS</span>':u.has_access?'<span class="badge ok">PAGANDO</span>':'<span class="badge off">SIN PAGO</span>') : ''}
       <small>${u.tx_count} movimientos · ${u.last_seen?'activo '+ago(u.last_seen):'sin actividad'}</small></div>
     <div class="am" style="color:var(--muted)">›</div></button>`).join('');
   $$('#adUsers .lg').forEach(b=>b.onclick=()=>openUser(adminData.users.find(u=>u.id==b.dataset.id)));
@@ -873,6 +997,10 @@ function openUser(u){
   $('#uInfo').textContent = `Cuenta creada el ${created} · ${u.tx_count} movimientos` + (u.is_me ? ' · Para tu contraseña usa "Cambiar contraseña".' : '');
   ['#uReset','#uAdmin','#uDelete'].forEach(id=>$(id).style.display = u.is_me ? 'none' : 'block');
   $('#uAdmin').textContent = u.is_admin ? 'Quitar administrador' : 'Hacer administrador';
+  $('#uFree').style.display = (adminData.paywall && !u.is_admin) ? 'block' : 'none';
+  $('#uFree').textContent = u.free_access ? 'Quitar acceso gratis' : '🎁 Dar acceso gratis';
+  if (adminData.paywall && !u.is_admin) $('#uInfo').textContent += u.free_access ? ' · Acceso gratis'
+    : u.paid_until ? ` · Pagado hasta el ${fdate(u.paid_until)}${u.sub_status==='canceled'?' (cancelada)':''}` : ' · Sin pagos';
   openSheet('#userSheet');
 }
 $('#uReset').onclick = async ()=>{
@@ -890,6 +1018,10 @@ $('#tempCopy').onclick = async ()=>{
 $('#uAdmin').onclick = async ()=>{
   try{ await api(`/api/admin/users/${selUser.id}/admin`,{method:'PUT',body:JSON.stringify({is_admin:!selUser.is_admin})});
     closeSheets(); toast('Actualizado'); loadAdmin(); }catch(e){ toast(e.message); }
+};
+$('#uFree').onclick = async ()=>{
+  try{ await api(`/api/admin/users/${selUser.id}/free`,{method:'PUT',body:JSON.stringify({free_access:!selUser.free_access})});
+    closeSheets(); toast(selUser.free_access ? 'Acceso gratis quitado' : 'Acceso gratis concedido'); loadAdmin(); }catch(e){ toast(e.message); }
 };
 $('#uDelete').onclick = async ()=>{
   const typed = prompt(`Se borrará la cuenta de ${selUser.username} y TODOS sus datos. No se puede deshacer.\n\nEscribe "${selUser.username}" para confirmar:`);
@@ -1396,7 +1528,7 @@ document.querySelector('main').addEventListener('touchend',e=>{
 
 function esc(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 
-(async()=>{ try{ cfg = await api('/api/config'); COLORS = cfg.palette || []; await loadMe(); if (!me.must_change_pw) await load(); }catch(e){ if (e.message!=='Sesión caducada') toast(e.message); } })();
+(async()=>{ try{ cfg = await api('/api/config'); COLORS = cfg.palette || []; await loadMe(); if (!me.must_change_pw && me.billing.active) await load(); }catch(e){ if (e.message!=='Sesión caducada') toast(e.message); } })();
 </script>
 </body>
 </html>
